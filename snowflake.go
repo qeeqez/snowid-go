@@ -72,27 +72,38 @@ func NewNodeWithEpoch(machineID int64, epoch time.Time) (*Node, error) {
 
 // Generate creates and returns a unique snowflake ID
 func (n *Node) Generate() (int64, error) {
-	now := time.Now().UTC()
-	timestamp := now.Sub(n.epoch).Milliseconds()
+	var timestamp, seq int64
 
-	t := atomic.LoadInt64(&n.time)
-	if timestamp < t {
-		return 0, ErrTimeMovedBackwards
-	}
+	for {
+		now := time.Now().UTC()
+		timestamp = now.Sub(n.epoch).Milliseconds()
 
-	if t == timestamp {
-		sequence := atomic.AddInt64(&n.sequence, 1) & maxSequence
-		if sequence == 0 {
-			return 0, ErrSequenceOverflow
+		t := atomic.LoadInt64(&n.time)
+		if timestamp < t {
+			// Clock moved backwards, wait until we catch up
+			time.Sleep(time.Duration(t-timestamp) * time.Millisecond)
+			continue
 		}
-		return n.createID(timestamp, sequence), nil
+
+		if t == timestamp {
+			seq = atomic.AddInt64(&n.sequence, 1) - 1 // Subtract 1 since AddInt64 returns the new value
+			if seq > maxSequence {
+				// Sequence exhausted, wait for next millisecond
+				time.Sleep(time.Until(now.Add(time.Millisecond)))
+				continue
+			}
+		} else {
+			// Try to update timestamp and reset sequence
+			if atomic.CompareAndSwapInt64(&n.time, t, timestamp) {
+				seq = 0
+				atomic.StoreInt64(&n.sequence, 1) // Start from 1 for next sequence
+			} else {
+				continue // CAS failed, retry
+			}
+		}
+
+		return n.createID(timestamp, seq), nil
 	}
-
-	// Different millisecond, reset sequence
-	atomic.StoreInt64(&n.time, timestamp)
-	atomic.StoreInt64(&n.sequence, 0)
-
-	return n.createID(timestamp, 0), nil
 }
 
 // createID composes a 64-bit snowflake ID from timestamp, machineID and sequence

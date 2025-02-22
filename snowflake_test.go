@@ -153,6 +153,59 @@ func TestNode_GenerateConcurrent(t *testing.T) {
 	}
 }
 
+func TestNode_GenerateHighConcurrency(t *testing.T) {
+	node, err := NewNode(1)
+	if err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	idChan := make(chan int64, 100000)
+	workers := 100
+	idsPerWorker := 1000
+
+	start := time.Now()
+	// Generate IDs concurrently
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < idsPerWorker; j++ {
+				id, err := node.Generate()
+				if err != nil {
+					t.Errorf("failed to generate ID: %v", err)
+					return
+				}
+				idChan <- id
+			}
+		}()
+	}
+
+	// Wait for all workers to finish
+	wg.Wait()
+	close(idChan)
+
+	// Check uniqueness
+	seen := make(map[int64]bool)
+	var ids []int64
+	for id := range idChan {
+		if seen[id] {
+			t.Errorf("duplicate ID found: %d", id)
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+
+	duration := time.Since(start)
+	t.Logf("Generated %d unique IDs in %v (%.2f IDs/sec)", len(ids), duration, float64(len(ids))/duration.Seconds())
+
+	// Verify we got the expected number of IDs
+	expectedCount := workers * idsPerWorker
+	if len(ids) != expectedCount {
+		t.Errorf("got %d IDs, want %d", len(ids), expectedCount)
+	}
+}
+
 func TestNode_Decompose(t *testing.T) {
 	node, err := NewNode(123)
 	if err != nil {
