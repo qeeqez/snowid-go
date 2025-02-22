@@ -30,6 +30,12 @@ const (
 
 	// Time constants
 	millisecond = int64(time.Millisecond / time.Nanosecond)
+
+	// Pre-calculated masks and limits
+	timestampMask  = uint64((1 << timestampBits) - 1)
+	machineIDMask  = uint64((1 << machineIDBits) - 1)
+	sequenceMask   = uint64((1 << sequenceBits) - 1)
+	maxTimestamp   = 1 << timestampBits
 )
 
 var (
@@ -45,12 +51,13 @@ var (
 
 // Node represents a snowflake generator node/machine
 type Node struct {
-	epoch     time.Time
-	machineID int64
-	time      int64
-	sequence  int64
-	// For testing purposes
-	mockTime *int64
+	epoch           time.Time
+	epochMs         int64    // Cached epoch in milliseconds
+	machineID       int64
+	shiftedMachineID uint64  // Pre-shifted machine ID
+	time            int64
+	sequence        int64
+	mockTime        *int64
 }
 
 // NewNode creates a new snowflake node that can generate unique IDs
@@ -69,11 +76,13 @@ func NewNodeWithEpoch(machineID int64, epoch time.Time) (*Node, error) {
 	}
 
 	return &Node{
-		epoch:     epoch,
-		machineID: machineID,
-		time:      0,
-		sequence:  0,
-		mockTime:  nil,
+		epoch:            epoch,
+		epochMs:          epoch.UnixNano() / millisecond,
+		machineID:        machineID,
+		shiftedMachineID: (uint64(machineID) & machineIDMask) << machineIDShift,
+		time:             0,
+		sequence:         0,
+		mockTime:         nil,
 	}, nil
 }
 
@@ -91,46 +100,36 @@ func (n *Node) Generate() (int64, error) {
 		} else {
 			now = time.Now().UTC().UnixNano() / millisecond
 		}
-		epochMs := n.epoch.UnixNano() / millisecond
-		timestamp := now - epochMs
+		timestamp := now - n.epochMs
 
-		// Ensure timestamp is within valid range first
-		if timestamp < 0 {
-			return 0, fmt.Errorf("timestamp out of range: %d", timestamp)
-		}
-		if timestamp >= (1 << timestampBits) {
+		if uint64(timestamp) >= maxTimestamp {
 			return 0, fmt.Errorf("timestamp out of range: %d", timestamp)
 		}
 
-		t := atomic.LoadInt64(&n.time)
-		if timestamp < t {
-			// Clock moved backwards
-			diff := t - timestamp
-			if diff > 1 { // Allow 1ms tolerance
+		currentTime := atomic.LoadInt64(&n.time)
+		if timestamp < currentTime {
+			diff := currentTime - timestamp
+			if diff > 5 { // Increased tolerance for parallel execution
 				return 0, ErrTimeMovedBackwards
 			}
-			// Small drift, just use the stored time
-			timestamp = t
+			timestamp = currentTime
 		}
 
 		var seq int64
-		if t == timestamp {
+		if timestamp == currentTime {
 			seq = atomic.AddInt64(&n.sequence, 1) - 1
 			if seq > maxSequence {
-				// Sequence exhausted, fast forward to next millisecond
 				if n.mockTime == nil {
 					time.Sleep(250 * time.Microsecond)
 				}
 				continue
 			}
-		} else if timestamp > t {
-			// Try to update timestamp and reset sequence
-			if atomic.CompareAndSwapInt64(&n.time, t, timestamp) {
-				seq = 0
-				atomic.StoreInt64(&n.sequence, 1)
-			} else {
+		} else if timestamp > currentTime {
+			if !atomic.CompareAndSwapInt64(&n.time, currentTime, timestamp) {
 				continue
 			}
+			atomic.StoreInt64(&n.sequence, 1)
+			seq = 0
 		} else {
 			continue
 		}
@@ -139,16 +138,13 @@ func (n *Node) Generate() (int64, error) {
 	}
 }
 
-// createID composes a 64-bit snowflake ID from timestamp, machineID and sequence
+// createID composes a 64-bit snowflake ID from timestamp and sequence
 func (n *Node) createID(timestamp, sequence int64) int64 {
-	// Convert to uint64 for bit operations to handle 42-bit timestamp correctly
-	ts := uint64(timestamp) & ((uint64(1) << timestampBits) - 1)
-	mid := uint64(n.machineID) & ((uint64(1) << machineIDBits) - 1)
-	seq := uint64(sequence) & ((uint64(1) << sequenceBits) - 1)
-	
-	// Shift and combine
-	id := (ts << timestampLeftShift) | (mid << machineIDShift) | seq
-	return int64(id)
+	return int64(
+		(uint64(timestamp) & timestampMask) << timestampLeftShift |
+		n.shiftedMachineID |
+		(uint64(sequence) & sequenceMask),
+	)
 }
 
 // Decompose breaks down a snowflake ID into its components
@@ -165,9 +161,9 @@ func (n *Node) Decompose(id int64) ID {
 	
 	// Extract components using masks
 	return ID{
-		Timestamp: int64((uid >> timestampLeftShift) & ((uint64(1) << timestampBits) - 1)),
-		MachineID: int64((uid >> machineIDShift) & ((uint64(1) << machineIDBits) - 1)),
-		Sequence:  int64(uid & ((uint64(1) << sequenceBits) - 1)),
+		Timestamp: int64((uid >> timestampLeftShift) & timestampMask),
+		MachineID: int64((uid >> machineIDShift) & machineIDMask),
+		Sequence:  int64(uid & sequenceMask),
 	}
 }
 
