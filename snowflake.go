@@ -1,3 +1,10 @@
+// Package snowflake implements a distributed unique ID generator inspired by Twitter's Snowflake
+// but with extended 42-bit timestamp like Discord for longer epoch time.
+//
+// A Snowflake ID is composed of:
+//   - 42 bits for time in milliseconds (gives us 139 years)
+//   - 10 bits for machine id (gives us 1024 machines)
+//   - 12 bits for sequence number (4096 unique IDs per millisecond per machine)
 package snowflake
 
 import (
@@ -7,119 +14,113 @@ import (
 )
 
 const (
-	// Custom epoch (2024-01-01 00:00:00 UTC)
-	epoch int64 = 1704067200000
+	// Bit lengths of Snowflake ID parts
+	timestampBits uint8 = 42 // Extended from Twitter's 41 bits to Discord's 42 bits
+	machineIDBits uint8 = 10
+	sequenceBits  uint8 = 12
 
-	// Bits allocations (following Discord's format)
-	timestampBits  uint8 = 42
-	workerIDBits   uint8 = 5
-	processIDBits  uint8 = 5
-	sequenceBits   uint8 = 12
+	// Max values for Snowflake ID parts
+	maxMachineID = int64(-1) ^ (int64(-1) << machineIDBits) // 1023
+	maxSequence  = int64(-1) ^ (int64(-1) << sequenceBits)  // 4095
 
-	// Maximum values
-	maxWorkerID   int64 = -1 ^ (-1 << workerIDBits)
-	maxProcessID  int64 = -1 ^ (-1 << processIDBits)
-	maxSequence   int64 = -1 ^ (-1 << sequenceBits)
-
-	// Bit shifts
-	timestampShift = workerIDBits + processIDBits + sequenceBits
-	workerShift    = processIDBits + sequenceBits
-	processShift   = sequenceBits
+	// Bit shifts for composing Snowflake ID
+	timestampLeftShift = machineIDBits + sequenceBits
+	machineIDShift    = sequenceBits
 )
 
 var (
-	ErrInvalidWorkerID  = errors.New("worker ID must be between 0 and 31")
-	ErrInvalidProcessID = errors.New("process ID must be between 0 and 31")
-	ErrClockBackwards   = errors.New("invalid system clock: time moved backwards")
-	ErrTimeBeforeEpoch  = errors.New("invalid system clock: time is before epoch")
-	ErrSequenceExhausted = errors.New("sequence exhausted for current millisecond")
+	// Errors
+	ErrTimeMovedBackwards = errors.New("time has moved backwards")
+	ErrMachineIDTooLarge  = errors.New("machine ID must be between 0 and 1023")
+	ErrSequenceOverflow   = errors.New("sequence overflow")
+	ErrInvalidEpoch       = errors.New("epoch must be a time in the past")
+
+	// Default epoch is set to 2024-01-01 00:00:00 UTC
+	defaultEpoch = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 
-// Snowflake holds the necessary information to generate snowflake IDs
-type Snowflake struct {
-	workerID  int64
-	processID int64
-	time      atomic.Int64 // last timestamp
-	seq       atomic.Int64 // sequence within the same millisecond
+// Node represents a snowflake generator node/machine
+type Node struct {
+	epoch     time.Time
+	machineID int64
+	time      int64
+	sequence  int64
 }
 
-// NewSnowflake creates a new Snowflake instance
-func NewSnowflake(workerID, processID int64) (*Snowflake, error) {
-	if workerID < 0 || workerID > maxWorkerID {
-		return nil, ErrInvalidWorkerID
-	}
-	if processID < 0 || processID > maxProcessID {
-		return nil, ErrInvalidProcessID
+// NewNode creates a new snowflake node that can generate unique IDs
+func NewNode(machineID int64) (*Node, error) {
+	return NewNodeWithEpoch(machineID, defaultEpoch)
+}
+
+// NewNodeWithEpoch creates a new snowflake node with custom epoch
+func NewNodeWithEpoch(machineID int64, epoch time.Time) (*Node, error) {
+	if machineID < 0 || machineID > maxMachineID {
+		return nil, ErrMachineIDTooLarge
 	}
 
-	return &Snowflake{
-		workerID:  workerID,
-		processID: processID,
+	if epoch.After(time.Now()) {
+		return nil, ErrInvalidEpoch
+	}
+
+	return &Node{
+		epoch:     epoch,
+		machineID: machineID,
+		time:      0,
+		sequence:  0,
 	}, nil
 }
 
-// NextID generates a new snowflake ID using atomic operations
-func (s *Snowflake) NextID() (int64, error) {
-	for {
-		timestamp := time.Now().UnixMilli()
-		if timestamp < epoch {
-			return 0, ErrTimeBeforeEpoch
+// Generate creates and returns a unique snowflake ID
+func (n *Node) Generate() (int64, error) {
+	now := time.Now().UTC()
+	timestamp := now.Sub(n.epoch).Milliseconds()
+
+	t := atomic.LoadInt64(&n.time)
+	if timestamp < t {
+		return 0, ErrTimeMovedBackwards
+	}
+
+	if t == timestamp {
+		sequence := atomic.AddInt64(&n.sequence, 1) & maxSequence
+		if sequence == 0 {
+			return 0, ErrSequenceOverflow
 		}
-		timestamp = timestamp - epoch
+		return n.createID(timestamp, sequence), nil
+	}
 
-		lastTimestamp := s.time.Load()
-		if timestamp < lastTimestamp {
-			return 0, ErrClockBackwards
-		}
+	// Different millisecond, reset sequence
+	atomic.StoreInt64(&n.time, timestamp)
+	atomic.StoreInt64(&n.sequence, 0)
 
-		var seq int64
-		if timestamp == lastTimestamp {
-			// Same millisecond, try to increment sequence
-			currentSeq := s.seq.Load()
-			seq = (currentSeq + 1) & maxSequence
-			if seq == 0 {
-				// Sequence exhausted, wait for next millisecond
-				continue
-			}
-			if !s.seq.CompareAndSwap(currentSeq, seq) {
-				// Another thread modified sequence, retry
-				continue
-			}
-		} else {
-			// Different millisecond, try to update timestamp and reset sequence
-			if !s.time.CompareAndSwap(lastTimestamp, timestamp) {
-				// Another thread updated timestamp, retry
-				continue
-			}
-			s.seq.Store(0)
-			seq = 0
-		}
+	return n.createID(timestamp, 0), nil
+}
 
-		// Compose ID
-		id := (timestamp << timestampShift) |
-			(s.workerID << workerShift) |
-			(s.processID << processShift) |
-			seq
+// createID composes a 64-bit snowflake ID from timestamp, machineID and sequence
+func (n *Node) createID(timestamp, sequence int64) int64 {
+	id := timestamp << timestampLeftShift
+	id |= n.machineID << machineIDShift
+	id |= sequence
+	return id
+}
 
-		return id, nil
+// Decompose breaks down a snowflake ID into its components
+type ID struct {
+	Timestamp int64
+	MachineID int64
+	Sequence  int64
+}
+
+// Decompose extracts the timestamp, machine ID and sequence from a snowflake ID
+func (n *Node) Decompose(id int64) ID {
+	return ID{
+		Timestamp: (id >> timestampLeftShift),
+		MachineID: (id >> machineIDShift) & maxMachineID,
+		Sequence:  id & maxSequence,
 	}
 }
 
-// Parse deconstructs a snowflake ID into its components
-func Parse(id int64) (timestamp, workerID, processID, sequence int64) {
-	const mask = (1 << timestampBits) - 1
-	timestamp = ((id >> timestampShift) & mask) + epoch
-	workerID = (id >> workerShift) & maxWorkerID
-	processID = (id >> processShift) & maxProcessID
-	sequence = id & maxSequence
-	return
-}
-
-// waitNextMillis waits until the next millisecond
-func waitNextMillis(last int64) int64 {
-	timestamp := time.Now().UnixMilli()
-	for timestamp <= last {
-		timestamp = time.Now().UnixMilli()
-	}
-	return timestamp
+// Time returns the time at which the snowflake ID was generated
+func (n *Node) Time(id int64) time.Time {
+	decomposed := n.Decompose(id)
+	return n.epoch.Add(time.Duration(decomposed.Timestamp) * time.Millisecond)
 }
