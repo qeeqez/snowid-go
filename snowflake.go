@@ -9,6 +9,7 @@ package snowflake
 
 import (
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 )
@@ -77,13 +78,18 @@ func NewNodeWithEpoch(machineID int64, epoch time.Time) (*Node, error) {
 func (n *Node) Generate() (int64, error) {
 	for {
 		now := time.Now().UTC().UnixNano() / millisecond
-		timestamp := now - n.epoch.UnixNano()/millisecond
+		epochMs := n.epoch.UnixNano() / millisecond
+		timestamp := now - epochMs
 
 		t := atomic.LoadInt64(&n.time)
 		if timestamp < t {
-			// Clock moved backwards, wait until we catch up
-			time.Sleep(time.Duration(t-timestamp) * time.Millisecond)
-			continue
+			// Clock moved backwards
+			diff := t - timestamp
+			if diff > 1 { // Allow 1ms tolerance
+				return 0, ErrTimeMovedBackwards
+			}
+			// Small drift, just use the stored time
+			timestamp = t
 		}
 
 		var seq int64
@@ -106,14 +112,25 @@ func (n *Node) Generate() (int64, error) {
 			continue
 		}
 
+		// Ensure timestamp is within valid range
+		if timestamp < 0 || timestamp >= (1<<timestampBits) {
+			return 0, fmt.Errorf("timestamp out of range: %d", timestamp)
+		}
+
 		return n.createID(timestamp, seq), nil
 	}
 }
 
 // createID composes a 64-bit snowflake ID from timestamp, machineID and sequence
 func (n *Node) createID(timestamp, sequence int64) int64 {
-	// Using bit operations for better performance
-	return (timestamp << timestampLeftShift) | (n.machineID << machineIDShift) | sequence
+	// Convert to uint64 for bit operations to handle 42-bit timestamp correctly
+	ts := uint64(timestamp) & ((uint64(1) << timestampBits) - 1)
+	mid := uint64(n.machineID) & ((uint64(1) << machineIDBits) - 1)
+	seq := uint64(sequence) & ((uint64(1) << sequenceBits) - 1)
+	
+	// Shift and combine
+	id := (ts << timestampLeftShift) | (mid << machineIDShift) | seq
+	return int64(id)
 }
 
 // Decompose breaks down a snowflake ID into its components
@@ -125,10 +142,14 @@ type ID struct {
 
 // Decompose extracts the timestamp, machine ID and sequence from a snowflake ID
 func (n *Node) Decompose(id int64) ID {
+	// Convert to uint64 for bit operations
+	uid := uint64(id)
+	
+	// Extract components using masks
 	return ID{
-		Timestamp: (id >> timestampLeftShift),
-		MachineID: (id >> machineIDShift) & maxMachineID,
-		Sequence:  id & maxSequence,
+		Timestamp: int64((uid >> timestampLeftShift) & ((uint64(1) << timestampBits) - 1)),
+		MachineID: int64((uid >> machineIDShift) & ((uint64(1) << machineIDBits) - 1)),
+		Sequence:  int64(uid & ((uint64(1) << sequenceBits) - 1)),
 	}
 }
 
