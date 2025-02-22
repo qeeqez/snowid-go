@@ -26,6 +26,9 @@ const (
 	// Bit shifts for composing Snowflake ID
 	timestampLeftShift = machineIDBits + sequenceBits
 	machineIDShift    = sequenceBits
+
+	// Time constants
+	millisecond = int64(time.Millisecond / time.Nanosecond)
 )
 
 var (
@@ -72,11 +75,9 @@ func NewNodeWithEpoch(machineID int64, epoch time.Time) (*Node, error) {
 
 // Generate creates and returns a unique snowflake ID
 func (n *Node) Generate() (int64, error) {
-	var timestamp, seq int64
-
 	for {
-		now := time.Now().UTC()
-		timestamp = now.Sub(n.epoch).Milliseconds()
+		now := time.Now().UTC().UnixNano() / millisecond
+		timestamp := now - n.epoch.UnixNano()/millisecond
 
 		t := atomic.LoadInt64(&n.time)
 		if timestamp < t {
@@ -85,21 +86,24 @@ func (n *Node) Generate() (int64, error) {
 			continue
 		}
 
+		var seq int64
 		if t == timestamp {
-			seq = atomic.AddInt64(&n.sequence, 1) - 1 // Subtract 1 since AddInt64 returns the new value
+			seq = atomic.AddInt64(&n.sequence, 1) - 1
 			if seq > maxSequence {
-				// Sequence exhausted, wait for next millisecond
-				time.Sleep(time.Until(now.Add(time.Millisecond)))
+				// Sequence exhausted, fast forward to next millisecond
+				time.Sleep(250 * time.Microsecond)
 				continue
 			}
-		} else {
+		} else if timestamp > t {
 			// Try to update timestamp and reset sequence
 			if atomic.CompareAndSwapInt64(&n.time, t, timestamp) {
 				seq = 0
-				atomic.StoreInt64(&n.sequence, 1) // Start from 1 for next sequence
+				atomic.StoreInt64(&n.sequence, 1)
 			} else {
-				continue // CAS failed, retry
+				continue
 			}
+		} else {
+			continue
 		}
 
 		return n.createID(timestamp, seq), nil
@@ -108,10 +112,8 @@ func (n *Node) Generate() (int64, error) {
 
 // createID composes a 64-bit snowflake ID from timestamp, machineID and sequence
 func (n *Node) createID(timestamp, sequence int64) int64 {
-	id := timestamp << timestampLeftShift
-	id |= n.machineID << machineIDShift
-	id |= sequence
-	return id
+	// Using bit operations for better performance
+	return (timestamp << timestampLeftShift) | (n.machineID << machineIDShift) | sequence
 }
 
 // Decompose breaks down a snowflake ID into its components
