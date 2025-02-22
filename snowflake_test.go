@@ -1,6 +1,7 @@
 package snowflake
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -300,7 +301,7 @@ func TestNode_SequenceOverflow(t *testing.T) {
 
 	// Set sequence to max value
 	atomic.StoreInt64(&node.sequence, maxSequence)
-	
+
 	// Generate should still work by waiting for next millisecond
 	id, err := node.Generate()
 	if err != nil {
@@ -341,12 +342,12 @@ func TestNode_IDComponents(t *testing.T) {
 		machineID int64
 		sequence  int64
 	}{
-		{0, 0, 0},                    // All zeros
-		{int64((uint64(1) << 42) - 1), 0, 0},           // Max timestamp
-		{0, maxMachineID, 0},        // Max machine ID
-		{0, 0, maxSequence},         // Max sequence
+		{0, 0, 0},                            // All zeros
+		{int64((uint64(1) << 42) - 1), 0, 0}, // Max timestamp
+		{0, maxMachineID, 0},                 // Max machine ID
+		{0, 0, maxSequence},                  // Max sequence
 		{int64((uint64(1) << 42) - 1), maxMachineID, maxSequence}, // All max values
-		{1234567, 789, 4000},        // Random values
+		{1234567, 789, 4000}, // Random values
 	}
 
 	node, err := NewNode(0)
@@ -369,9 +370,9 @@ func TestNode_IDComponents(t *testing.T) {
 
 func TestNode_CustomEpochEdgeCases(t *testing.T) {
 	tests := []struct {
-		name      string
-		epoch     time.Time
-		wantErr   bool
+		name    string
+		epoch   time.Time
+		wantErr bool
 	}{
 		{
 			"epoch at Unix zero time",
@@ -544,5 +545,230 @@ func TestNode_GenerateStress(t *testing.T) {
 	expectedCount := workers * idsPerWorker
 	if len(ids) != expectedCount {
 		t.Errorf("got %d IDs, want %d", len(ids), expectedCount)
+	}
+}
+
+func TestNode_MaxTimestampBoundary(t *testing.T) {
+	node, err := NewNode(0)
+	if err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
+	// Test timestamp near 42-bit limit
+	maxTimestamp := int64((1 << timestampBits) - 1)
+	id := node.createID(maxTimestamp, 0)
+	decomposed := node.Decompose(id)
+	
+	if decomposed.Timestamp != maxTimestamp {
+		t.Errorf("max timestamp not preserved, got %d, want %d", decomposed.Timestamp, maxTimestamp)
+	}
+
+	// Set mock time to a value that will result in max timestamp + 1
+	mockTime := node.epoch.UnixNano()/millisecond + (1 << timestampBits)
+	node.setMockTime(&mockTime)
+
+	// Reset node state
+	atomic.StoreInt64(&node.time, 0)
+	atomic.StoreInt64(&node.sequence, 0)
+
+	// Try to generate ID with timestamp beyond limit
+	_, err = node.Generate()
+	if err == nil {
+		t.Error("expected error for timestamp beyond 42-bit limit")
+	} else {
+		expectedTimestamp := int64(1 << timestampBits)
+		expectedError := fmt.Sprintf("timestamp out of range: %d", expectedTimestamp)
+		if err.Error() != expectedError {
+			t.Errorf("unexpected error message: got %v, want %v", err, expectedError)
+		}
+	}
+}
+
+func TestNode_TimeComponentValidation(t *testing.T) {
+	node, err := NewNode(0)
+	if err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		mockTime  int64
+		wantError bool
+		errorMsg  string
+	}{
+		{
+			name:      "time exactly at epoch",
+			mockTime:  node.epoch.UnixNano() / millisecond,
+			wantError: false,
+		},
+		{
+			name:      "time at max timestamp",
+			mockTime:  node.epoch.UnixNano()/millisecond + (1 << timestampBits),
+			wantError: true,
+			errorMsg:  "timestamp out of range: %d",
+		},
+		{
+			name:      "time near max timestamp",
+			mockTime:  node.epoch.UnixNano()/millisecond + ((1 << timestampBits) * 9 / 10),
+			wantError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset node state for each test
+			atomic.StoreInt64(&node.time, 0)
+			atomic.StoreInt64(&node.sequence, 0)
+			
+			// Set mock time
+			node.setMockTime(&tt.mockTime)
+
+			// Calculate expected timestamp for error message
+			timestamp := tt.mockTime - node.epoch.UnixNano()/millisecond
+
+			// Try to generate ID
+			_, err := node.Generate()
+			
+			if tt.wantError {
+				if err == nil {
+					t.Errorf("expected error for timestamp %d, got nil", timestamp)
+				} else if tt.errorMsg != "" && err.Error() != fmt.Sprintf(tt.errorMsg, timestamp) {
+					t.Errorf("unexpected error message: got %v, want %v", err, fmt.Sprintf(tt.errorMsg, timestamp))
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error for timestamp %d: %v", timestamp, err)
+				}
+			}
+		})
+	}
+}
+
+func TestNode_DecompositionEdgeCases(t *testing.T) {
+	node, err := NewNode(maxMachineID)
+	if err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
+	// Calculate maximum valid ID within int64 range
+	maxValidTimestamp := int64((1 << timestampBits) - 1)
+	maxID := node.createID(maxValidTimestamp, maxSequence)
+
+	tests := []struct {
+		name string
+		id   int64
+		want ID
+	}{
+		{
+			name: "maximum valid values",
+			id:   maxID,
+			want: ID{
+				Timestamp: maxValidTimestamp,
+				MachineID: maxMachineID,
+				Sequence:  maxSequence,
+			},
+		},
+		{
+			name: "zero values",
+			id:   0,
+			want: ID{
+				Timestamp: 0,
+				MachineID: 0,
+				Sequence:  0,
+			},
+		},
+		{
+			name: "alternating bits",
+			id:   0x555555555555,
+			want: ID{
+				Timestamp: 0x555555555555 >> (machineIDBits + sequenceBits),
+				MachineID: (0x555555555555 >> sequenceBits) & maxMachineID,
+				Sequence:  0x555555555555 & maxSequence,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := node.Decompose(tt.id)
+			if got != tt.want {
+				t.Errorf("Decompose() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNode_BitPatternEdgeCases(t *testing.T) {
+	tests := []struct {
+		name      string
+		timestamp int64
+		machineID int64
+		sequence  int64
+	}{
+		{"all bits set in each component", (1 << timestampBits) - 1, maxMachineID, maxSequence},
+		{"alternating bits in timestamp", 0x555555555555 & ((1 << timestampBits) - 1), maxMachineID, maxSequence},
+		{"alternating bits in sequence", (1 << timestampBits) - 1, maxMachineID, 0x555},
+		{"single bit set in each component", 1 << (timestampBits - 1), 1 << (machineIDBits - 1), 1 << (sequenceBits - 1)},
+	}
+
+	node, err := NewNode(0)
+	if err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id := node.createID(tt.timestamp, tt.sequence)
+			decomposed := node.Decompose(id)
+
+			if decomposed.Timestamp != tt.timestamp {
+				t.Errorf("timestamp mismatch, got %d, want %d", decomposed.Timestamp, tt.timestamp)
+			}
+			if decomposed.Sequence != tt.sequence {
+				t.Errorf("sequence mismatch, got %d, want %d", decomposed.Sequence, tt.sequence)
+			}
+		})
+	}
+}
+
+func TestNode_MillisecondPrecision(t *testing.T) {
+	node, err := NewNode(0)
+	if err != nil {
+		t.Fatalf("failed to create node: %v", err)
+	}
+
+	// Generate IDs with precise timing
+	start := time.Now()
+	var lastID int64
+	var lastTime time.Time
+
+	// Generate IDs for 10ms
+	for time.Since(start) < 10*time.Millisecond {
+		id, err := node.Generate()
+		if err != nil {
+			t.Fatalf("failed to generate ID: %v", err)
+		}
+
+		currentTime := node.Time(id)
+
+		if lastID != 0 {
+			// Check time difference is not less than 0
+			diff := currentTime.Sub(lastTime)
+			if diff < 0 {
+				t.Errorf("time went backwards: %v", diff)
+			}
+
+			// Check millisecond precision
+			if diff > time.Millisecond {
+				decomp1 := node.Decompose(lastID)
+				decomp2 := node.Decompose(id)
+				if decomp2.Timestamp-decomp1.Timestamp > 1 {
+					t.Errorf("time gap too large: %d ms", decomp2.Timestamp-decomp1.Timestamp)
+				}
+			}
+		}
+
+		lastID = id
+		lastTime = currentTime
 	}
 }

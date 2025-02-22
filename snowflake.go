@@ -49,6 +49,8 @@ type Node struct {
 	machineID int64
 	time      int64
 	sequence  int64
+	// For testing purposes
+	mockTime *int64
 }
 
 // NewNode creates a new snowflake node that can generate unique IDs
@@ -71,15 +73,34 @@ func NewNodeWithEpoch(machineID int64, epoch time.Time) (*Node, error) {
 		machineID: machineID,
 		time:      0,
 		sequence:  0,
+		mockTime:  nil,
 	}, nil
+}
+
+// setMockTime sets a mock time for testing purposes
+func (n *Node) setMockTime(t *int64) {
+	n.mockTime = t
 }
 
 // Generate creates and returns a unique snowflake ID
 func (n *Node) Generate() (int64, error) {
 	for {
-		now := time.Now().UTC().UnixNano() / millisecond
+		var now int64
+		if n.mockTime != nil {
+			now = atomic.LoadInt64(n.mockTime)
+		} else {
+			now = time.Now().UTC().UnixNano() / millisecond
+		}
 		epochMs := n.epoch.UnixNano() / millisecond
 		timestamp := now - epochMs
+
+		// Ensure timestamp is within valid range first
+		if timestamp < 0 {
+			return 0, fmt.Errorf("timestamp out of range: %d", timestamp)
+		}
+		if timestamp >= (1 << timestampBits) {
+			return 0, fmt.Errorf("timestamp out of range: %d", timestamp)
+		}
 
 		t := atomic.LoadInt64(&n.time)
 		if timestamp < t {
@@ -97,7 +118,9 @@ func (n *Node) Generate() (int64, error) {
 			seq = atomic.AddInt64(&n.sequence, 1) - 1
 			if seq > maxSequence {
 				// Sequence exhausted, fast forward to next millisecond
-				time.Sleep(250 * time.Microsecond)
+				if n.mockTime == nil {
+					time.Sleep(250 * time.Microsecond)
+				}
 				continue
 			}
 		} else if timestamp > t {
@@ -110,11 +133,6 @@ func (n *Node) Generate() (int64, error) {
 			}
 		} else {
 			continue
-		}
-
-		// Ensure timestamp is within valid range
-		if timestamp < 0 || timestamp >= (1<<timestampBits) {
-			return 0, fmt.Errorf("timestamp out of range: %d", timestamp)
 		}
 
 		return n.createID(timestamp, seq), nil
