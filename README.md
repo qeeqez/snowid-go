@@ -1,62 +1,71 @@
-# Snowflake
+# Snowflake ID Generator
 
-A Go library that implements Discord-style Snowflake IDs with a custom epoch starting from January 1st, 2024. It generates unique 64-bit IDs that are time-sortable and guaranteed to be unique within a distributed system.
+A high-performance, thread-safe implementation of Discord's Snowflake ID format in Go.
 
-## Structure
+## Features
 
-The ID is composed of:
-- 42 bits for timestamp (milliseconds since 2024-01-01 00:00:00 UTC)
-- 5 bits for worker ID (0-31)
-- 5 bits for process ID (0-31)
-- 12 bits for sequence number
+- Fully compatible with Discord's Snowflake format
+- Thread-safe using atomic operations
+- Custom epoch support (default: 2024-01-01 00:00:00 UTC)
+- High performance (~244ns/op sequential, ~307ns/op parallel)
+- Zero memory allocations
+- Comprehensive test coverage including concurrent generation
+
+## Snowflake Format
+
+The snowflake format follows Discord's specification:
+
+```
+111111111111111111111111111111111111111111 11111 11111 111111111111
+64                                         22    17    12          0
+```
+
+- Timestamp: 42 bits (milliseconds since epoch)
+- Worker ID: 5 bits (0-31)
+- Process ID: 5 bits (0-31)
+- Sequence: 12 bits (0-4095 per millisecond)
 
 ## Usage
 
 ```go
-package main
-
-import (
-    "fmt"
-    "github.com/qeeqez/snowflake"
-)
-
-func main() {
-    // Create a new snowflake generator with worker ID 1 and process ID 1
-    sf, err := snowflake.NewSnowflake(1, 1)
-    if err != nil {
-        panic(err)
-    }
-
-    // Generate a new ID
-    id, err := sf.NextID()
-    if err != nil {
-        panic(err)
-    }
-    fmt.Printf("Generated ID: %d\n", id)
-
-    // Parse an ID to get its components
-    timestamp, workerID, processID, sequence := snowflake.Parse(id)
-    fmt.Printf("Timestamp: %d\n", timestamp)
-    fmt.Printf("Worker ID: %d\n", workerID)
-    fmt.Printf("Process ID: %d\n", processID)
-    fmt.Printf("Sequence: %d\n", sequence)
+// Create a new snowflake generator with worker ID 1 and process ID 1
+sf, err := NewSnowflake(1, 1)
+if err != nil {
+    log.Fatal(err)
 }
+
+// Generate a new ID
+id, err := sf.NextID()
+if err != nil {
+    log.Fatal(err)
+}
+
+// Parse an ID back into its components
+timestamp, workerID, processID, sequence := Parse(id)
 ```
 
-## Features
+## Thread Safety
 
-- Thread-safe ID generation
-- Custom epoch (2024-01-01)
-- Discord-style bit allocation
-- ID parsing functionality
-- Guaranteed unique IDs within a distributed system (when properly configured)
+The implementation uses atomic operations instead of mutexes for better performance. It's safe to use a single Snowflake instance across multiple goroutines.
 
-## Installation
+## Error Handling
 
-```bash
-go get github.com/qeeqez/snowflake
+The implementation includes proper error handling for various edge cases:
+
+- Invalid worker/process IDs
+- Clock moving backwards
+- Time before epoch
+- Sequence exhaustion
+
+## Performance
+
+Benchmark results on Apple M3 Pro:
+
+```
+BenchmarkNextID/Sequential-12     4921972    244.2 ns/op    0 B/op    0 allocs/op
+BenchmarkNextID/Parallel-12       3988285    306.9 ns/op    0 B/op    0 allocs/op
 ```
 
 ## License
 
-MIT License
+MIT
