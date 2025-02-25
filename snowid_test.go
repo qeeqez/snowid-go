@@ -1,4 +1,4 @@
-package snowflake
+package snowid
 
 import (
 	"fmt"
@@ -558,7 +558,7 @@ func TestNode_MaxTimestampBoundary(t *testing.T) {
 	maxTimestamp := int64((1 << timestampBits) - 1)
 	id := node.createID(maxTimestamp, 0)
 	decomposed := node.Decompose(id)
-	
+
 	if decomposed.Timestamp != maxTimestamp {
 		t.Errorf("max timestamp not preserved, got %d, want %d", decomposed.Timestamp, maxTimestamp)
 	}
@@ -619,7 +619,7 @@ func TestNode_TimeComponentValidation(t *testing.T) {
 			// Reset node state for each test
 			atomic.StoreInt64(&node.time, 0)
 			atomic.StoreInt64(&node.sequence, 0)
-			
+
 			// Set mock time
 			node.setMockTime(&tt.mockTime)
 
@@ -628,7 +628,7 @@ func TestNode_TimeComponentValidation(t *testing.T) {
 
 			// Try to generate ID
 			_, err := node.Generate()
-			
+
 			if tt.wantError {
 				if err == nil {
 					t.Errorf("expected error for timestamp %d, got nil", timestamp)

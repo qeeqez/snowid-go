@@ -1,11 +1,11 @@
-// Package snowflake implements a distributed unique ID generator inspired by Twitter's Snowflake
+// Package snowid implements a distributed unique ID generator inspired by Twitter's Snowflake
 // but with extended 42-bit timestamp like Discord for longer epoch time.
 //
-// A Snowflake ID is composed of:
+// A SnowID is composed of:
 //   - 42 bits for time in milliseconds (gives us 139 years)
 //   - 10 bits for machine id (gives us 1024 machines)
 //   - 12 bits for sequence number (4096 unique IDs per millisecond per machine)
-package snowflake
+package snowid
 
 import (
 	"errors"
@@ -15,27 +15,27 @@ import (
 )
 
 const (
-	// Bit lengths of Snowflake ID parts
+	// Bit lengths of SnowID ID parts
 	timestampBits uint8 = 42 // Extended from Twitter's 41 bits to Discord's 42 bits
 	machineIDBits uint8 = 10
 	sequenceBits  uint8 = 12
 
-	// Max values for Snowflake ID parts
+	// Max values for SnowID ID parts
 	maxMachineID = int64(-1) ^ (int64(-1) << machineIDBits) // 1023
 	maxSequence  = int64(-1) ^ (int64(-1) << sequenceBits)  // 4095
 
-	// Bit shifts for composing Snowflake ID
+	// Bit shifts for composing SnowID ID
 	timestampLeftShift = machineIDBits + sequenceBits
-	machineIDShift    = sequenceBits
+	machineIDShift     = sequenceBits
 
 	// Time constants
 	millisecond = int64(time.Millisecond / time.Nanosecond)
 
 	// Pre-calculated masks and limits
-	timestampMask  = uint64((1 << timestampBits) - 1)
-	machineIDMask  = uint64((1 << machineIDBits) - 1)
-	sequenceMask   = uint64((1 << sequenceBits) - 1)
-	maxTimestamp   = 1 << timestampBits
+	timestampMask = uint64((1 << timestampBits) - 1)
+	machineIDMask = uint64((1 << machineIDBits) - 1)
+	sequenceMask  = uint64((1 << sequenceBits) - 1)
+	maxTimestamp  = 1 << timestampBits
 )
 
 var (
@@ -49,23 +49,23 @@ var (
 	defaultEpoch = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 
-// Node represents a snowflake generator node/machine
+// Node represents a snowid generator node/machine
 type Node struct {
-	epoch           time.Time
-	epochMs         int64    // Cached epoch in milliseconds
-	machineID       int64
-	shiftedMachineID uint64  // Pre-shifted machine ID
-	time            int64
-	sequence        int64
-	mockTime        *int64
+	epoch            time.Time
+	epochMs          int64 // Cached epoch in milliseconds
+	machineID        int64
+	shiftedMachineID uint64 // Pre-shifted machine ID
+	time             int64
+	sequence         int64
+	mockTime         *int64
 }
 
-// NewNode creates a new snowflake node that can generate unique IDs
+// NewNode creates a new snowid node that can generate unique IDs
 func NewNode(machineID int64) (*Node, error) {
 	return NewNodeWithEpoch(machineID, defaultEpoch)
 }
 
-// NewNodeWithEpoch creates a new snowflake node with custom epoch
+// NewNodeWithEpoch creates a new snowid node with custom epoch
 func NewNodeWithEpoch(machineID int64, epoch time.Time) (*Node, error) {
 	if machineID < 0 || machineID > maxMachineID {
 		return nil, ErrMachineIDTooLarge
@@ -91,7 +91,7 @@ func (n *Node) setMockTime(t *int64) {
 	n.mockTime = t
 }
 
-// Generate creates and returns a unique snowflake ID
+// Generate creates and returns a unique snowid ID
 func (n *Node) Generate() (int64, error) {
 	for {
 		var now int64
@@ -138,27 +138,27 @@ func (n *Node) Generate() (int64, error) {
 	}
 }
 
-// createID composes a 64-bit snowflake ID from timestamp and sequence
+// createID composes a 64-bit snowid ID from timestamp and sequence
 func (n *Node) createID(timestamp, sequence int64) int64 {
 	return int64(
-		(uint64(timestamp) & timestampMask) << timestampLeftShift |
-		n.shiftedMachineID |
-		(uint64(sequence) & sequenceMask),
+		(uint64(timestamp)&timestampMask)<<timestampLeftShift |
+			n.shiftedMachineID |
+			(uint64(sequence) & sequenceMask),
 	)
 }
 
-// Decompose breaks down a snowflake ID into its components
+// Decompose breaks down a snowid ID into its components
 type ID struct {
 	Timestamp int64
 	MachineID int64
 	Sequence  int64
 }
 
-// Decompose extracts the timestamp, machine ID and sequence from a snowflake ID
+// Decompose extracts the timestamp, machine ID and sequence from a snowid ID
 func (n *Node) Decompose(id int64) ID {
 	// Convert to uint64 for bit operations
 	uid := uint64(id)
-	
+
 	// Extract components using masks
 	return ID{
 		Timestamp: int64((uid >> timestampLeftShift) & timestampMask),
@@ -167,7 +167,7 @@ func (n *Node) Decompose(id int64) ID {
 	}
 }
 
-// Time returns the time at which the snowflake ID was generated
+// Time returns the time at which the snowid ID was generated
 func (n *Node) Time(id int64) time.Time {
 	decomposed := n.Decompose(id)
 	return n.epoch.Add(time.Duration(decomposed.Timestamp) * time.Millisecond)
