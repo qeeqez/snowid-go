@@ -39,7 +39,6 @@ const (
 )
 
 var (
-	// Errors
 	ErrTimeMovedBackwards = errors.New("time has moved backwards")
 	ErrMachineIDTooLarge  = errors.New("machine ID must be between 0 and 1023")
 	ErrSequenceOverflow   = errors.New("sequence overflow")
