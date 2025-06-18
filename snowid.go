@@ -146,7 +146,7 @@ func (n *Node) createID(timestamp, sequence int64) int64 {
 	)
 }
 
-// Decompose breaks down a snowid ID into its components
+// ID Decompose breaks down a snowid ID into its components
 type ID struct {
 	Timestamp int64
 	MachineID int64
