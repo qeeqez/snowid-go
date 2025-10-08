@@ -15,7 +15,7 @@ jobs:
       - name: ⬇️ Set up GO
         uses: actions/setup-go@v5
         with:
-          go-version: '^1.24.0'
+          go-version: '^1.25.0'
 
       - name: 🛠️ Build
         run: CGO_ENABLED=0 go build
