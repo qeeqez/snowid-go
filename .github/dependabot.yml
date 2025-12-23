@@ -4,8 +4,6 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
-    assignees:
-      - "theqeeqez"
     groups:
       dependencies:
         patterns:
@@ -15,5 +13,3 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
-    assignees:
-      - "theqeeqez"
